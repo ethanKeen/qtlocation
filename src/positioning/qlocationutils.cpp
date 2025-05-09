@@ -49,6 +49,9 @@
 
 #include <math.h>
 
+// in order to give HDT (true heading) priority over RMC/VTG
+static bool haveAbsoluteHeading = false;
+
 QT_BEGIN_NAMESPACE
 
 // converts e.g. 15306.0235 from NMEA sentence to 153.100392
@@ -212,9 +215,10 @@ static void qlocationutils_readRmc(const char *data, int size, QGeoPositionInfo 
     }
     if (parts.count() > 8 && parts[8].count() > 0) {
         value = parts[8].toDouble(&parsed);
-        if (parsed)
-            info->setAttribute(QGeoPositionInfo::Direction, qreal(value));
+        if (parsed && !haveAbsoluteHeading)  //added check for if we have absolute heading
+        info->setAttribute(QGeoPositionInfo::Direction, qreal(value));
     }
+
     if (parts.count() > 11 && parts[11].count() == 1
             && (parts[11][0] == 'E' || parts[11][0] == 'W')) {
         value = parts[10].toDouble(&parsed);
@@ -243,7 +247,7 @@ static void qlocationutils_readVtg(const char *data, int size, QGeoPositionInfo 
     double value = 0.0;
     if (parts.count() > 1 && parts[1].count() > 0) {
         value = parts[1].toDouble(&parsed);
-        if (parsed)
+        if (parsed && !haveAbsoluteHeading) //added check for absolute heading before setting track heading
             info->setAttribute(QGeoPositionInfo::Direction, qreal(value));
     }
     if (parts.count() > 7 && parts[7].count() > 0) {
@@ -278,6 +282,24 @@ static void qlocationutils_readZda(const char *data, int size, QGeoPositionInfo 
     info->setTimestamp(QDateTime(date, time, Qt::UTC));
 }
 
+static void qlocationutils_readHdt(const char *data, int size, QGeoPositionInfo *info)
+{
+    // reset-on-every-sentence is done in getPosInfoFromNmea()
+    // split into fields
+    QByteArray sentence(data, size);
+    const auto parts = sentence.split(',');
+    if (parts.size() < 2)
+        return;
+    bool ok = false;
+    double hd = parts.at(1).toDouble(&ok);
+    if (!ok)
+        return;
+    haveAbsoluteHeading = true;
+    info->setAttribute(QGeoPositionInfo::Direction, qreal(hd));
+    // optional: if you want to carry an accuracy
+    info->setAttribute(QGeoPositionInfo::DirectionAccuracy, 0.0);
+}
+
 QLocationUtils::NmeaSentence QLocationUtils::getNmeaSentenceType(const char *data, int size)
 {
     if (size < 6 || data[0] != '$' || !hasValidNmeaChecksum(data, size))
@@ -304,12 +326,17 @@ QLocationUtils::NmeaSentence QLocationUtils::getNmeaSentenceType(const char *dat
     if (data[3] == 'Z' && data[4] == 'D' && data[5] == 'A')
         return NmeaSentenceZDA;
 
+    if (data[3] == 'H' && data[4] == 'D' && data[5] == 'T')
+        return NmeaSentenceHDT;
+
     return NmeaSentenceInvalid;
 }
 
 bool QLocationUtils::getPosInfoFromNmea(const char *data, int size, QGeoPositionInfo *info,
                                         double uere, bool *hasFix)
 {
+    haveAbsoluteHeading = false; // set absolute heading flag to false
+    
     if (!info)
         return false;
 
@@ -346,6 +373,9 @@ bool QLocationUtils::getPosInfoFromNmea(const char *data, int size, QGeoPosition
         return true;
     case NmeaSentenceZDA:
         qlocationutils_readZda(data, size, info, hasFix);
+        return true;
+    case NmeaSentenceHDT:
+        qlocationutils_readHdt(data, size, info);
         return true;
     default:
         return false;
